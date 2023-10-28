@@ -1,5 +1,7 @@
+![Github Actions](https://github.com/guibar64/stackclosures/workflows/Github%20Actions/badge.svg)
 
 A macro (`stackClosures`) is provided to annotate a function, closures defined inside this function will be allocated on the stack.
+
 
 ```nim
 import std/sequtils
