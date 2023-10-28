@@ -1,0 +1,9 @@
+*
+!*.*
+!*/
+*.exe
+nimcache
+/testresults
+/outputGotten.txt
+megatest.nim
+.vscode
