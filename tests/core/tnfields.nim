@@ -1,6 +1,6 @@
 discard """
 action: "run"
-valgrind: false
+valgrind: true
 matrix: "--d:useMalloc -g"
 targets: "c"
 output: '''

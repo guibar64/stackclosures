@@ -1,6 +1,8 @@
 import std/[tables, hashes, macros]
 
-proc  rawProcEnvToProc*(rawProc, rawEnv: pointer, T: typedesc[proc]): T  {.noInit, inline.} =
+import stackclosures/private/desym
+
+proc rawProcEnvToProc*(rawProc, rawEnv: pointer, T: typedesc[proc]): T {.noInit, inline.} =
   ## Not meant to be used directly
   # cast does not work here so let's emit C
   # this proc use NRVO
@@ -36,15 +38,17 @@ proc nimClosure*(lambda: proc): auto = lambda
 proc hash(n: NimNode): Hash =
   result = !$ hash(n.signatureHash)
 
-type 
+type
   LocalData = object
     number: int
     envs: seq[int]
 
-proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData], names: var CountTable[string], nenvs: var int, currentEnv = -1, inLambda = false) =
-  if inLambda and n.kind == nnkSym and n.symKind notin {nskConst, nskResult, nskParam} and n.owner == root:
+proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData],
+    names: var CountTable[string], nenvs: var int, currentEnv = -1, inLambda = false) =
+  if inLambda and n.kind == nnkSym and n.symKind notin {nskConst, nskResult, nskParam} and
+      n.owner == root:
     #TODO maybe include not tyVar nskParam
-    
+
     if n notin locals:
       names.inc(n.strVal)
       locals[n] = LocalData(number: names[n.strVal], envs: @[currentEnv])
@@ -61,58 +65,24 @@ proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData]
       for c in n:
         findLocals(c, root, locals, names, nenvs, currentEnv, inLambda)
 
-proc desym(n: NimNode): NimNode =
-  case n.kind
-  of nnkSym:
-    result = ident(n.strVal)
-    copyLineInfo(result, n)
-  of RoutineNodes:
-    result = n.kind.newNimNode()
-    copyLineInfo(result, n)
-    for i in 0..<min(7, n.len):
-      if i == 0 and n.kind == nnkLambda:
-        result.add newEmptyNode()
-      else:
-        result.add desym(n[i])
-  of nnkHiddenStdConv:
-    # Attempt to reverse expansion of echo & co
-    if n[0].kind == nnkEmpty and n[1].kind == nnkBracket:
-      result = desym(n[1][0])
-    else:
-      result = desym(n[1])
-  of nnkHiddenCallConv:
-    result = desym(n[1])
-  of nnkHiddenDeref, nnkHiddenAddr:
-    result = desym(n[0])
-  of nnkConv:
-    result = newCall(desym n[0], desym n[1])
-    copyLineInfo(result, n)
-    
-  else:
-    if n.len == 0:
-      result = copyNimNode(n)
-    else:
-      result = n.kind.newNimNode()
-      copyLineInfo(result, n)
-      for c in n:
-        result.add desym(c)
-
 proc field(n: NimNode, d: LocalData): NimNode =
   ident(n.strVal & (if d.number > 0: $d.number else: ""))
 
-proc constructEnvs(locals: Table[NimNode, LocalData], env: NimNode, envType: NimNode, nenvs: int): NimNode =
+proc constructEnvs(locals: Table[NimNode, LocalData], env: NimNode, envType: NimNode,
+    nenvs: int): NimNode =
   if nenvs <= 0: return newEmptyNode()
   let typeSec = nnkTypeSection.newTree()
-  typeSec.add nnkTypeDef.newTree(envType, 
+  typeSec.add nnkTypeDef.newTree(envType,
     newEmptyNode(), nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), nnkRecList.newTree()))
-  var rec = typeSec[^1][^1][^1]    
+  var rec = typeSec[^1][^1][^1]
   let fakeMtype = ident"fakeMType"
   rec.add nnkIdentDefs.newTree(fakeMtype, ident"pointer", newEmptyNode())
   for loc, us in locals.pairs:
     rec.add nnkIdentDefs.newTree(loc.field(us), getType(loc), newEmptyNode())
 
   let wrapperType = ident(envType.strVal & ":wrapper")
-  typeSec.add nnkTypeDef.newTree(wrapperType, newEmptyNode(), nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), nnkRecList.newTree()))
+  typeSec.add nnkTypeDef.newTree(wrapperType, newEmptyNode(), nnkObjectTy.newTree(newEmptyNode(),
+      newEmptyNode(), nnkRecList.newTree()))
   rec = typeSec[^1][^1][^1]
   rec.add nnkIdentDefs.newTree(ident"head", ident"FakeRefCell", newEmptyNode())
   rec.add nnkIdentDefs.newTree(ident"env", envType, newEmptyNode())
@@ -121,27 +91,23 @@ proc constructEnvs(locals: Table[NimNode, LocalData], env: NimNode, envType: Nim
   result.add typeSec
   let envWrapper = ident(env.strVal & ":wrapper")
   result.add nnkVarSection.newTree(
-    newIdentDefs(envWrapper, wrapperType, nnkObjConstr.newtree(wrapperType, nnkExprColonExpr.newTree(ident"head", newCall(ident"default", ident"FakeRefCell")))),
+    newIdentDefs(envWrapper, wrapperType, nnkObjConstr.newtree(wrapperType,
+        nnkExprColonExpr.newTree(ident"head", newCall(ident"default", ident"FakeRefCell")))),
     newIdentDefs(env, nnkPtrTy.newTree(envType), newCall(ident"addr", nnkDotExpr.newTree(envWrapper, ident"env")))
   )
   # decRef & co will be called on the false closure
-  result.add newAssignment(nnkDotExpr.newTree(env, fakeMtype), newCall(ident"addr", ident"fakeNimType"))
+  result.add newAssignment(nnkDotExpr.newTree(env, fakeMtype), newCall(ident"addr",
+      ident"fakeNimType"))
 
 
-proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode, currentEnv: var int): NimNode =
+proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
+    currentEnv: var int): NimNode =
   case n.kind
   of nnkSym:
     if n in locals:
       result = nnkDotExpr.newTree(env, n.field(locals[n]))
     else:
       result = n
-      
-    when false:
-      if currentEnv >= 0 and n.kind == nnkSym and n.symKind notin {nskConst, nskResult, nskParam} and n.owner == root:        
-        if n notin locals:
-          locals[n] = @[currentEnv]
-        elif currentEnv notin locals[n]:
-          locals[n].add currentEnv
   of nnkLetSection, nnkVarSection:
     result = newStmtList()
     let newSec = copyNimNode(n)
@@ -152,7 +118,8 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode, cur
           let d = c[i]
           if d.kind == nnkSym and d in locals:
             if c[^1].kind != nnkEmpty:
-              result.add newAssignment(nnkDotExpr.newTree(env, d.field(locals[d])), transfBody(c[^1],locals,env,currentEnv))
+              result.add newAssignment(nnkDotExpr.newTree(env, d.field(locals[d])), transfBody(c[
+                  ^1], locals, env, currentEnv))
           else:
             newDef.add d
         if newDef.len > 0:
@@ -183,7 +150,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode, cur
       result[^1].addPragma(ident"nimcall")
       template toClos(closType, pid, env: untyped): untyped =
         rawProcEnvToProc(cast[pointer](pid), env, closType)
-      
+
       let closType = nnkProcTy.newTree(n.params, newEmptyNode())
       result.add getAst toClos(closType, pid, env)
     else:
@@ -201,7 +168,7 @@ proc stackClosureImpl(pn: NimNode): NimNode =
   let env = ident(":theStackEnv")
   var cenv = -1
   result = pn.kind.newTree(
-    pn.name, 
+    pn.name,
     pn[1],
     pn[2],
     pn[3],
@@ -219,4 +186,4 @@ macro stackClosures*(pn: typed) =
   when defined(js):
     result = pn
   else:
-    result =  stackCLosureImpl(pn)
+    result = stackCLosureImpl(pn)
