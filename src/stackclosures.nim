@@ -43,6 +43,15 @@ type
     number: int
     envs: seq[int]
 
+const closureKinds = {nnkLambda, nnkProcDef, nnkFuncDef}
+
+proc hasNonClosureConv(n: NimNode): bool =
+  expectKind n, closureKinds
+  for pragma in n.pragma:
+    if pragma.kind in {nnkIdent,nnkSym} and (pragma.eqIdent("nimcall") or pragma.eqIdent("cdecl") or pragma.eqIdent("stdcall")):
+      return false
+  return true
+
 proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData],
     names: var CountTable[string], nenvs: var int, currentEnv = -1, inLambda = false) =
   if inLambda and n.kind == nnkSym and n.symKind notin {nskConst, nskResult, nskParam} and
@@ -57,7 +66,7 @@ proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData]
   else:
     if n.kind in {nnkCall, nnkCommand} and n[0].eqIdent("nimClosure") and n.len > 1 and n[1].kind == nnkLambda:
       discard
-    elif n.kind == nnkLambda:
+    elif n.kind in closureKinds and n.hasNonClosureConv:
       inc nenvs
       for c in n.body:
         findLocals(c, root, locals, names, nenvs, currentEnv = currentEnv + 1, inLambda = true)
@@ -147,13 +156,13 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
     if n.kind in {nnkCall, nnkCommand} and n[0].eqIdent("nimClosure") and n.len > 1 and n[1].kind == nnkLambda:
       result = copyNimTree(n[1])
       result.body = transfBody(n[1].body, locals, env, currentEnv)
-    elif n.kind == nnkLambda:
-      result = newStmtList()
+    elif n.kind in closureKinds and n.hasNonClosureConv:
+      let closureDef = newStmtList()
       inc currentEnv
       let pid = ident(n[0].strVal & $(currentEnv))
       let nParams = copyNimTree(n.params)
       nParams.add newIdentDefs(env, nnkPtrTy.newTree(ident(":StackEnv")))
-      result.add nnkProcDef.newTree(
+      closureDef.add nnkProcDef.newTree(
         pid,
         newEmptyNode(),
         newEmptyNode(),
@@ -162,12 +171,16 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
         newEmptyNode(),
         transfBody(n.body, locals, env, currentEnv),
       )
-      result[^1].addPragma(ident"nimcall")
+      closureDef[^1].addPragma(ident"nimcall")
       template toClos(closType, pid, env: untyped): untyped =
         rawProcEnvToProc(cast[pointer](pid), env, closType)
 
       let closType = nnkProcTy.newTree(n.params, newEmptyNode())
-      result.add getAst toClos(closType, pid, env)
+      closureDef.add getAst toClos(closType, pid, env)
+      if n.kind == nnkLambda:
+        result = closureDef
+      else:
+        result = nnkLetSection.newTree(newIdentDefs(ident(n[0].strVal), closType, closureDef))
     else:
       result = copyNimNode(n)
       for c in n:
@@ -196,7 +209,8 @@ proc stackClosureImpl(pn: NimNode): NimNode =
   )
   result = desym(result)
 
-macro stackClosures*(pn: typed) =
+macro stackClosures*(pn: typed): untyped =
+  ## Allocates closures of `pn` on the stack.
   expectKind pn, {nnkProcDef, nnkFuncDef}
   when defined(js):
     result = pn
