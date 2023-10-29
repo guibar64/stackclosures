@@ -51,7 +51,7 @@ proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData]
 
     if n notin locals:
       names.inc(n.strVal)
-      locals[n] = LocalData(number: names[n.strVal], envs: @[currentEnv])
+      locals[n] = LocalData(number: names[n.strVal]-1, envs: @[currentEnv])
     else:
       locals[n].envs.add currentEnv
   else:
@@ -127,6 +127,21 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
           newDef.add transfBody(c[^1], locals, env, currentEnv)
           newSec.add newDef
     if newSec.len > 0: result.add newSec
+  of nnkForStmt:
+    result = copyNimNode(n)
+    # the forvar should not be touched here
+    for i in 0..<(n.len-2):
+      result.add n[i]
+    result.add transfBody(n[^2], locals, env, currentEnv)
+    result.add newStmtList()
+    for i in 0..<(n.len-2):
+      if n[i].kind == nnkSym and n[i] in locals:
+        result[^1].add newAssignment(nnkDotExpr.newTree(env, n[i].field(locals[n[i]])), n[i])
+      if n[i].kind == nnkVarTuple:
+        for v in n[i]:
+          if v.kind == nnkSym and v in locals:
+            result[^1].add newAssignment(nnkDotExpr.newTree(env, v.field(locals[v])), v)
+    result[^1].add transfBody(n[^1], locals, env, currentEnv)
 
   else:
     if n.kind in {nnkCall, nnkCommand} and n[0].eqIdent("nimClosure") and n.len > 1 and n[1].kind == nnkLambda:
@@ -186,4 +201,4 @@ macro stackClosures*(pn: typed) =
   when defined(js):
     result = pn
   else:
-    result = stackCLosureImpl(pn)
+    result = stackClosureImpl(pn)
