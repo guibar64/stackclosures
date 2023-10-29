@@ -48,15 +48,15 @@ const closureKinds = {nnkLambda, nnkProcDef, nnkFuncDef}
 proc hasNonClosureConv(n: NimNode): bool =
   expectKind n, closureKinds
   for pragma in n.pragma:
-    if pragma.kind in {nnkIdent,nnkSym} and (pragma.eqIdent("nimcall") or pragma.eqIdent("cdecl") or pragma.eqIdent("stdcall")):
+    if pragma.kind in {nnkIdent, nnkSym} and (pragma.eqIdent("nimcall") or pragma.eqIdent(
+        "cdecl") or pragma.eqIdent("stdcall")):
       return false
   return true
 
 proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData],
     names: var CountTable[string], nenvs: var int, currentEnv = -1, inLambda = false) =
-  if inLambda and n.kind == nnkSym and n.symKind notin {nskConst, nskResult, nskParam} and
+  if inLambda and n.kind == nnkSym and n.symKind notin {nskConst, nskResult} and
       n.owner == root:
-    #TODO maybe include not tyVar nskParam
 
     if n notin locals:
       names.inc(n.strVal)
@@ -77,6 +77,9 @@ proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData]
 proc field(n: NimNode, d: LocalData): NimNode =
   ident(n.strVal & (if d.number > 0: $d.number else: ""))
 
+proc skipVar(n: Nimnode): NimNode =
+  if n.kind == nnkBracketExpr and n[0].eqIdent("var"): n[1] else: n
+
 proc constructEnvs(locals: Table[NimNode, LocalData], env: NimNode, envType: NimNode,
     nenvs: int): NimNode =
   if nenvs <= 0: return newEmptyNode()
@@ -87,7 +90,9 @@ proc constructEnvs(locals: Table[NimNode, LocalData], env: NimNode, envType: Nim
   let fakeMtype = ident"fakeMType"
   rec.add nnkIdentDefs.newTree(fakeMtype, ident"pointer", newEmptyNode())
   for loc, us in locals.pairs:
-    rec.add nnkIdentDefs.newTree(loc.field(us), getType(loc), newEmptyNode())
+    let oType = getType(loc).skipVar()
+    rec.add nnkIdentDefs.newTree(loc.field(us), if loc.symKind == nskParam: nnkPtrTy.newTree(
+        oType) else: oType, newEmptyNode())
 
   let wrapperType = ident(envType.strVal & ":wrapper")
   typeSec.add nnkTypeDef.newTree(wrapperType, newEmptyNode(), nnkObjectTy.newTree(newEmptyNode(),
@@ -107,14 +112,24 @@ proc constructEnvs(locals: Table[NimNode, LocalData], env: NimNode, envType: Nim
   # decRef & co will be called on the false closure
   result.add newAssignment(nnkDotExpr.newTree(env, fakeMtype), newCall(ident"addr",
       ident"fakeNimType"))
+  for loc, us in locals.pairs:
+    if loc.symKind == nskParam:
+      result.add newAssignment(nnkDotExpr.newTree(env, loc.field(us)), newCall(ident"addr",
+        loc))
 
+proc getFromEnv(env: NimNode, n: NimNode, data: LocalData): NimNode =
+  let val = nnkDotExpr.newTree(env, n.field(data))
+  if n.symKind == nskParam:
+    nnkBracketExpr.newTree(val)
+  else:
+    val
 
 proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
     currentEnv: var int): NimNode =
   case n.kind
   of nnkSym:
     if n in locals:
-      result = nnkDotExpr.newTree(env, n.field(locals[n]))
+      result = getFromEnv(env, n, locals[n])
     else:
       result = n
   of nnkLetSection, nnkVarSection:
@@ -127,7 +142,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
           let d = c[i]
           if d.kind == nnkSym and d in locals:
             if c[^1].kind != nnkEmpty:
-              result.add newAssignment(nnkDotExpr.newTree(env, d.field(locals[d])), transfBody(c[
+              result.add newAssignment(getFromEnv(env, d, locals[d]), transfBody(c[
                   ^1], locals, env, currentEnv))
           else:
             newDef.add d
@@ -145,7 +160,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
     result.add newStmtList()
     for i in 0..<(n.len-2):
       if n[i].kind == nnkSym and n[i] in locals:
-        result[^1].add newAssignment(nnkDotExpr.newTree(env, n[i].field(locals[n[i]])), n[i])
+        result[^1].add newAssignment(getFromEnv(env, n[i], locals[n[i]]), n[i])
       if n[i].kind == nnkVarTuple:
         for v in n[i]:
           if v.kind == nnkSym and v in locals:

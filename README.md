@@ -31,6 +31,7 @@ Caveats (besides safety concerns):
 - the current implementation is quite eager to transform any inner proc to a closure even non-capturing ones, use explicit annotations like `nimcall` to avoid that.
 - Should not be compatible with `--mm:refc` (tests do pass but it may be an happy accident)
 - `sugar.=>` does not work (yet)
+- capturing parameters is allowed, caution is advised. Currently, `openArray` is not supported.
 - compatibility with regular Nim closures implies allocating some space for ref-like bookkeeping, that is an overhead of `2*sizeof(int)`
 	for ARC and `3*sizeof(int)` for ORC
 - the current implementation use one environment per containing function, it works OK for this limited purpose but it could be improved
