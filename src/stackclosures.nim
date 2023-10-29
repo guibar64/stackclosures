@@ -36,24 +36,30 @@ proc nimClosure*(lambda: proc): auto = lambda
 proc hash(n: NimNode): Hash =
   result = !$ hash(n.signatureHash)
 
-proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, seq[int]], nenvs: var int, currentEnv = -1, inLambda = false) =
+type 
+  LocalData = object
+    number: int
+    envs: seq[int]
+
+proc findLocals(n: NimNode, root: NimNode, locals: var Table[NimNode, LocalData], names: var CountTable[string], nenvs: var int, currentEnv = -1, inLambda = false) =
   if inLambda and n.kind == nnkSym and n.symKind notin {nskConst, nskResult, nskParam} and n.owner == root:
     #TODO maybe include not tyVar nskParam
     
     if n notin locals:
-      locals[n] = @[currentEnv]
+      names.inc(n.strVal)
+      locals[n] = LocalData(number: names[n.strVal], envs: @[currentEnv])
     else:
-      locals[n].add currentEnv
+      locals[n].envs.add currentEnv
   else:
     if n.kind in {nnkCall, nnkCommand} and n[0].eqIdent("nimClosure") and n.len > 1 and n[1].kind == nnkLambda:
       discard
     elif n.kind == nnkLambda:
       inc nenvs
       for c in n.body:
-        findLocals(c, root, locals, nenvs, currentEnv = currentEnv + 1, inLambda = true)
+        findLocals(c, root, locals, names, nenvs, currentEnv = currentEnv + 1, inLambda = true)
     else:
       for c in n:
-        findLocals(c, root, locals, nenvs, currentEnv, inLambda)
+        findLocals(c, root, locals, names, nenvs, currentEnv, inLambda)
 
 proc desym(n: NimNode): NimNode =
   case n.kind
@@ -91,7 +97,10 @@ proc desym(n: NimNode): NimNode =
       for c in n:
         result.add desym(c)
 
-proc constructEnvs(locals: Table[NimNode, seq[int]], env: NimNode, envType: NimNode, nenvs: int): NimNode =
+proc field(n: NimNode, d: LocalData): NimNode =
+  ident(n.strVal & (if d.number > 0: $d.number else: ""))
+
+proc constructEnvs(locals: Table[NimNode, LocalData], env: NimNode, envType: NimNode, nenvs: int): NimNode =
   if nenvs <= 0: return newEmptyNode()
   let typeSec = nnkTypeSection.newTree()
   typeSec.add nnkTypeDef.newTree(envType, 
@@ -100,7 +109,7 @@ proc constructEnvs(locals: Table[NimNode, seq[int]], env: NimNode, envType: NimN
   let fakeMtype = ident"fakeMType"
   rec.add nnkIdentDefs.newTree(fakeMtype, ident"pointer", newEmptyNode())
   for loc, us in locals.pairs:
-    rec.add nnkIdentDefs.newTree(loc, getType(loc), newEmptyNode())
+    rec.add nnkIdentDefs.newTree(loc.field(us), getType(loc), newEmptyNode())
 
   let wrapperType = ident(envType.strVal & ":wrapper")
   typeSec.add nnkTypeDef.newTree(wrapperType, newEmptyNode(), nnkObjectTy.newTree(newEmptyNode(), newEmptyNode(), nnkRecList.newTree()))
@@ -118,11 +127,12 @@ proc constructEnvs(locals: Table[NimNode, seq[int]], env: NimNode, envType: NimN
   # decRef & co will be called on the false closure
   result.add newAssignment(nnkDotExpr.newTree(env, fakeMtype), newCall(ident"addr", ident"fakeNimType"))
 
-proc transfBody(n: NimNode, locals: Table[NimNode, seq[int]], env: NimNode, currentEnv: var int): NimNode =
+
+proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode, currentEnv: var int): NimNode =
   case n.kind
   of nnkSym:
     if n in locals:
-      result = nnkDotExpr.newTree(env, ident(n.strVal))
+      result = nnkDotExpr.newTree(env, n.field(locals[n]))
     else:
       result = n
       
@@ -142,7 +152,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, seq[int]], env: NimNode, curr
           let d = c[i]
           if d.kind == nnkSym and d in locals:
             if c[^1].kind != nnkEmpty:
-              result.add newAssignment(nnkDotExpr.newTree(env, ident(d.strVal)), transfBody(c[^1],locals,env,currentEnv))
+              result.add newAssignment(nnkDotExpr.newTree(env, d.field(locals[d])), transfBody(c[^1],locals,env,currentEnv))
           else:
             newDef.add d
         if newDef.len > 0:
@@ -183,9 +193,10 @@ proc transfBody(n: NimNode, locals: Table[NimNode, seq[int]], env: NimNode, curr
 
 
 proc stackClosureImpl(pn: NimNode): NimNode =
-  var locals: Table[NimNode, seq[int]]
+  var locals: Table[NimNode, LocalData]
+  var names = initCountTable[string]()
   var nenvs: int
-  findLocals(pn.body, pn[0], locals, nenvs)
+  findLocals(pn.body, pn[0], locals, names, nenvs)
   let envType = ident(":StackEnv")
   let env = ident(":theStackEnv")
   var cenv = -1
