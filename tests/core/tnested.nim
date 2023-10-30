@@ -11,8 +11,9 @@ import std/[sequtils]
 import stackclosures
 
 proc foo(x: openArray[float]): seq[seq[float]] {.stackClosures.} =
+  let a = 3
   proc bar(x: seq[float]): seq[float] {.stackClosures.} =
-    let l = x.len.float
+    let l = float(x.len + a - 3)
     map(x, proc(x: float): float = x + l)
   let zz = count(x, 0.0).float
   let y = map(x, proc(x: float): float = x*(1+zz))

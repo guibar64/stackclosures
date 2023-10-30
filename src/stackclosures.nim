@@ -124,7 +124,7 @@ proc getFromEnv(env: NimNode, n: NimNode, data: LocalData): NimNode =
   else:
     val
 
-proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
+proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode, envType: NimNode,
     currentEnv: var int): NimNode =
   case n.kind
   of nnkSym:
@@ -143,12 +143,12 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
           if d.kind == nnkSym and d in locals:
             if c[^1].kind != nnkEmpty:
               result.add newAssignment(getFromEnv(env, d, locals[d]), transfBody(c[
-                  ^1], locals, env, currentEnv))
+                  ^1], locals, env, envType, currentEnv))
           else:
             newDef.add d
         if newDef.len > 0:
-          newDef.add transfBody(c[^2], locals, env, currentEnv)
-          newDef.add transfBody(c[^1], locals, env, currentEnv)
+          newDef.add transfBody(c[^2], locals, env, envType, currentEnv)
+          newDef.add transfBody(c[^1], locals, env, envType, currentEnv)
           newSec.add newDef
     if newSec.len > 0: result.add newSec
   of nnkForStmt:
@@ -156,7 +156,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
     # the forvar should not be touched here
     for i in 0..<(n.len-2):
       result.add n[i]
-    result.add transfBody(n[^2], locals, env, currentEnv)
+    result.add transfBody(n[^2], locals, env, envType, currentEnv)
     result.add newStmtList()
     for i in 0..<(n.len-2):
       if n[i].kind == nnkSym and n[i] in locals:
@@ -165,18 +165,18 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
         for v in n[i]:
           if v.kind == nnkSym and v in locals:
             result[^1].add newAssignment(nnkDotExpr.newTree(env, v.field(locals[v])), v)
-    result[^1].add transfBody(n[^1], locals, env, currentEnv)
+    result[^1].add transfBody(n[^1], locals, env, envType, currentEnv)
 
   else:
     if n.kind in {nnkCall, nnkCommand} and n[0].eqIdent("nimClosure") and n.len > 1 and n[1].kind == nnkLambda:
       result = copyNimTree(n[1])
-      result.body = transfBody(n[1].body, locals, env, currentEnv)
+      result.body = transfBody(n[1].body, locals, env, envType, currentEnv)
     elif n.kind in closureKinds and n.hasNonClosureConv:
       let closureDef = newStmtList()
       inc currentEnv
       let pid = ident((if n[0].kind == nnkSym: n[0].strVal else: ":anonymous") & "." & $(currentEnv))
       let nParams = copyNimTree(n.params)
-      nParams.add newIdentDefs(env, nnkPtrTy.newTree(ident(":StackEnv")))
+      nParams.add newIdentDefs(env, nnkPtrTy.newTree(envType))
       closureDef.add nnkProcDef.newTree(
         pid,
         n[1],
@@ -184,7 +184,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
         nParams,
         n.pragma,
         newEmptyNode(),
-        transfBody(n.body, locals, env, currentEnv),
+        transfBody(n.body, locals, env, envType, currentEnv),
       )
       closureDef[^1].addPragma(ident"nimcall")
       template toClos(closType, pid, env: untyped): untyped =
@@ -205,7 +205,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
     else:
       result = copyNimNode(n)
       for c in n:
-        result.add transfBody(c, locals, env, currentEnv)
+        result.add transfBody(c, locals, env, envType, currentEnv)
 
 
 proc stackClosureImpl(pn: NimNode): NimNode =
@@ -213,8 +213,8 @@ proc stackClosureImpl(pn: NimNode): NimNode =
   var names = initCountTable[string]()
   var nenvs: int
   findLocals(pn.body, pn[0], locals, names, nenvs)
-  let envType = ident(":StackEnv")
-  let env = ident(":theStackEnv")
+  let envType = ident(":StackEnv:" & pn[0].strVal & signatureHash(pn[0]))
+  let env = ident(":theStackEnv:" & pn[0].strVal & signatureHash(pn[0]))
   var cenv = -1
   result = pn.kind.newTree(
     pn.name,
@@ -225,7 +225,7 @@ proc stackClosureImpl(pn: NimNode): NimNode =
     pn[5],
     newStmtList(
       constructEnvs(locals, env, envType, nenvs),
-      transfBody(pn.body, locals, env, cenv),
+      transfBody(pn.body, locals, env, envType, cenv),
     )
   )
   result = desym(result)

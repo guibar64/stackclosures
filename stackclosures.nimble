@@ -1,5 +1,5 @@
 
-version = "0.1.1"
+version = "0.1.2"
 author = "G. Bareigts"
 description = "Allocate closures on stack"
 license = "MIT"
