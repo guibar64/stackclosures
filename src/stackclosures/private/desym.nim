@@ -45,6 +45,17 @@ proc desym*(n: NimNode): NimNode =
           result.add desym(d)
       else:
         result.add desym(c)
+  of nnkOpenSymChoice, nnkClosedSymChoice:
+    # ⚠ the syms may have different names.
+    result = ident(n[0].strVal)
+    copyLineInfo(result, n)
+  of nnkGenericParams:
+    result = lightCopyNode(n)
+    for c in n:
+      if c.kind == nnkSym:
+        result.add newIdentDefs(ident(c.strVal), newEmptyNode(), newEmptyNode())
+      else:
+        result.add desym(c)
   else:
     if n.len == 0:
       result = copyNimNode(n)

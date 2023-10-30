@@ -174,7 +174,7 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
     elif n.kind in closureKinds and n.hasNonClosureConv:
       let closureDef = newStmtList()
       inc currentEnv
-      let pid = ident(n[0].strVal & $(currentEnv))
+      let pid = ident((if n[0].kind == nnkSym: n[0].strVal else: ":anonymous") & "." & $(currentEnv))
       let nParams = copyNimTree(n.params)
       nParams.add newIdentDefs(env, nnkPtrTy.newTree(ident(":StackEnv")))
       closureDef.add nnkProcDef.newTree(
@@ -213,7 +213,7 @@ proc stackClosureImpl(pn: NimNode): NimNode =
   result = pn.kind.newTree(
     pn.name,
     pn[1],
-    pn[2],
+    desym pn[2],
     pn[3],
     pn.pragma,
     pn[4],
