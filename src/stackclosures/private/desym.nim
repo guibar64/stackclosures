@@ -56,6 +56,19 @@ proc desym*(n: NimNode): NimNode =
         result.add newIdentDefs(ident(c.strVal), newEmptyNode(), newEmptyNode())
       else:
         result.add desym(c)
+  of nnkFormalParams:
+    result = lightCopyNode(n)
+    if n[0].kind == nnkArgList:
+      # Produced by sugar.=>
+      result.add ident("auto")
+    else:
+      result.add desym(n[0])
+    for i in 1..<n.len:
+      let c = n[i]
+      if c.kind == nnkSym and c.symKind() != nskType:
+        result.add newIdentDefs(desym(c), desym(c.getType()))
+      else:
+        result.add desym(c)
   else:
     if n.len == 0:
       result = copyNimNode(n)

@@ -179,8 +179,8 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
       nParams.add newIdentDefs(env, nnkPtrTy.newTree(ident(":StackEnv")))
       closureDef.add nnkProcDef.newTree(
         pid,
-        newEmptyNode(),
-        newEmptyNode(),
+        n[1],
+        n[2],
         nParams,
         n.pragma,
         newEmptyNode(),
@@ -190,7 +190,13 @@ proc transfBody(n: NimNode, locals: Table[NimNode, LocalData], env: NimNode,
       template toClos(closType, pid, env: untyped): untyped =
         rawProcEnvToProc(cast[pointer](pid), env, closType)
 
-      let closType = nnkProcTy.newTree(n.params, newEmptyNode())
+      let closType = nnkProcTy.newTree(nnkFormalParams.newNimNode())
+      let rawType = if n[0].kind == nnkSym: n[0].getType() else: n.getType()
+      if rawType.len > 1:
+        closType[0].add rawType[1]
+        for i in 2..<rawType.len:
+          closType[0].add(newIdentDefs(ident"_", rawType[i]))
+      closType.add nnkPragma.newTree(ident"closure")
       closureDef.add getAst toClos(closType, pid, env)
       if n.kind == nnkLambda:
         result = closureDef
@@ -216,7 +222,7 @@ proc stackClosureImpl(pn: NimNode): NimNode =
     desym pn[2],
     pn[3],
     pn.pragma,
-    pn[4],
+    pn[5],
     newStmtList(
       constructEnvs(locals, env, envType, nenvs),
       transfBody(pn.body, locals, env, cenv),
